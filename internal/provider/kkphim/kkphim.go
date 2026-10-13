@@ -95,15 +95,15 @@ type detailResponse struct {
 		OriginName   string `json:"origin_name"`
 		Slug         string `json:"slug"`
 		Year         int    `json:"year"`
-		EpisodeTotal string `json:"episode_total"`
+		EpisodeTotal any    `json:"episode_total"`
 		Type         string `json:"type"`
 	} `json:"movie"`
 	Episodes []struct {
 		ServerName string `json:"server_name"`
 		ServerData []struct {
-			Name     string `json:"name"`
-			Slug     string `json:"slug"`
-			LinkM3u8 string `json:"link_m3u8"`
+			Name      string `json:"name"`
+			Slug      string `json:"slug"`
+			LinkM3u8  string `json:"link_m3u8"`
 			LinkEmbed string `json:"link_embed"`
 		} `json:"server_data"`
 	} `json:"episodes"`
@@ -137,7 +137,15 @@ func (p *Provider) GetMedia(ctx context.Context, slug string) (*domain.MediaItem
 		cat = "tv"
 	}
 
-	totalEps, _ := strconv.Atoi(detail.Movie.EpisodeTotal)
+	totalEps := 0
+	switch v := detail.Movie.EpisodeTotal.(type) {
+	case float64:
+		totalEps = int(v)
+	case int:
+		totalEps = v
+	case string:
+		totalEps, _ = strconv.Atoi(v)
+	}
 	item := &domain.MediaItem{
 		ID:            detail.Movie.Slug,
 		Title:         detail.Movie.Name,

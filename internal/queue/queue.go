@@ -379,6 +379,7 @@ func (m *Manager) downloadEpisodeWithFFmpeg(ctx context.Context, job *Job, strea
 		"-i", streamURL,
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
+		"-f", "mp4",
 		"-progress", "pipe:1",
 		"-y", tmpFile,
 	}
