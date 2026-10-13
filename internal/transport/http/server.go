@@ -181,13 +181,13 @@ func (s *Server) dispatchJobToQueue(rawURL, title, cat, customSavePath string) {
 				if season <= 0 {
 					season = 1
 				}
-				destDir = filepath.Join(s.cfg.Storage.TVBaseDir, seriesClean, fmt.Sprintf("Season %02d", season))
+				destDir = filepath.Join(s.cfg.Storage.DefaultDownloadDir, "series", seriesClean, fmt.Sprintf("Season %02d", season))
 			} else {
 				movieName := formatter.PickBestEnglishTitle(media.OriginalTitle, "", media.Title)
 				if movieName == "" {
 					movieName = media.Title
 				}
-				destDir = filepath.Join(s.cfg.Storage.MovieBaseDir, movieName)
+				destDir = filepath.Join(s.cfg.Storage.DefaultDownloadDir, "movies", movieName)
 			}
 		}
 

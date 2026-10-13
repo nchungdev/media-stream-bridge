@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"media-stream-bridge/internal/queue"
@@ -73,10 +74,12 @@ func (s *Server) handleQBitPreferences(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQBitCategories(w http.ResponseWriter, r *http.Request) {
+	tvDownloadDir := filepath.Join(s.cfg.Storage.DefaultDownloadDir, "series")
+	movieDownloadDir := filepath.Join(s.cfg.Storage.DefaultDownloadDir, "movies")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"tv-sonarr": map[string]string{"savePath": s.cfg.Storage.TVBaseDir},
-		"radarr":    map[string]string{"savePath": s.cfg.Storage.MovieBaseDir},
+		"tv-sonarr": map[string]string{"savePath": tvDownloadDir},
+		"radarr":    map[string]string{"savePath": movieDownloadDir},
 	})
 }
 
