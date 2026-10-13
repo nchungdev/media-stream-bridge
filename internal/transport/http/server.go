@@ -16,22 +16,25 @@ import (
 	"media-stream-bridge/internal/config"
 	"media-stream-bridge/internal/downloader"
 	"media-stream-bridge/internal/formatter"
+	"media-stream-bridge/internal/queue"
 	"media-stream-bridge/internal/service"
 )
 
 type Server struct {
-	cfg        *config.Config
-	aggregator *service.Aggregator
-	downloader *downloader.Engine
-	router     *chi.Mux
+	cfg          *config.Config
+	aggregator   *service.Aggregator
+	downloader   *downloader.Engine
+	queueManager *queue.Manager
+	router       *chi.Mux
 }
 
-func NewServer(cfg *config.Config, agg *service.Aggregator, dl *downloader.Engine) *Server {
+func NewServer(cfg *config.Config, agg *service.Aggregator, dl *downloader.Engine, qm *queue.Manager) *Server {
 	s := &Server{
-		cfg:        cfg,
-		aggregator: agg,
-		downloader: dl,
-		router:     chi.NewRouter(),
+		cfg:          cfg,
+		aggregator:   agg,
+		downloader:   dl,
+		queueManager: qm,
+		router:       chi.NewRouter(),
 	}
 	s.setupRoutes()
 	return s
@@ -49,9 +52,15 @@ func (s *Server) setupRoutes() {
 		AllowedHeaders: []string{"*"},
 	}))
 
-	// Status & health
+	// Dashboard & Root
 	s.router.Get("/", s.handleRoot)
 	s.router.Get("/api/status", s.handleStatus)
+
+	// Setup qBittorrent mock endpoints for Sonarr/Radarr
+	s.setupQBittorrentRoutes()
+
+	// Setup Web Dashboard endpoints
+	s.setupDashboardRoutes()
 
 	// Torznab endpoints (compat with Prowlarr / Sonarr / Radarr)
 	s.router.Get("/torznab", s.handleTorznab)
@@ -63,20 +72,27 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		s.handleDashboardHTML(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"service": "Media Stream Bridge",
-		"version": "2.0 (Golang)",
-		"status":  "running",
-		"torznab": "/torznab/api",
+		"service":   "Media Stream Bridge",
+		"version":   "2.1 (Golang + Queue Manager)",
+		"status":    "running",
+		"dashboard": "/dashboard",
+		"torznab":   "/torznab/api",
+		"qbittorrent": "/api/v2",
 	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":  "ok",
-		"version": "2.0.0",
+		"status":      "ok",
+		"version":     "2.1.0",
+		"queue_count": len(s.queueManager.GetAllJobs()),
 	})
 }
 
@@ -132,51 +148,51 @@ func (s *Server) handleTorznabDownload(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Torznab Grab] Grabbed item: %s, url: %s, cat: %s", title, rawURL, cat)
 
-	// Async download dispatch
-	go func() {
-		if !strings.HasPrefix(rawURL, "bridge://") {
-			return
-		}
-
-		bgCtx := context.Background()
-		media, err := s.aggregator.GetMediaByURI(bgCtx, rawURL)
-		if err != nil {
-			log.Printf("[Torznab Grab] Failed to fetch media detail for %s: %v", rawURL, err)
-			return
-		}
-
-		var destDir string
-		if media.Category == "tv" || cat == "tv" {
-			seriesClean := formatter.PickBestEnglishTitle(media.OriginalTitle, "", media.Title)
-			if seriesClean == "" {
-				seriesClean = media.Title
-			}
-			seriesClean = formatter.CleanSeriesName(seriesClean)
-			season := formatter.DetectSeason(media.Title, media.OriginalTitle, title)
-			if season <= 0 {
-				season = 1
-			}
-			destDir = filepath.Join(s.cfg.Storage.TVBaseDir, seriesClean, fmt.Sprintf("Season %02d", season))
-		} else {
-			movieName := formatter.PickBestEnglishTitle(media.OriginalTitle, "", media.Title)
-			if movieName == "" {
-				movieName = media.Title
-			}
-			destDir = filepath.Join(s.cfg.Storage.MovieBaseDir, movieName)
-		}
-
-		log.Printf("[Torznab Grab] Dispatching %d episodes of '%s' to '%s'", len(media.Episodes), media.Title, destDir)
-		for _, ep := range media.Episodes {
-			_ = s.downloader.DownloadEpisode(bgCtx, media, &ep, destDir)
-		}
-
-		// Trigger Sonarr/Radarr series rescan
-		s.downloader.NotifySonarrRefresh(s.cfg.Arr.SonarrURL, s.cfg.Arr.SonarrAPIKey, 0)
-	}()
+	// Dispatch to central queue
+	s.dispatchJobToQueue(rawURL, title, cat, "")
 
 	// Return dummy 200 OK torrent content so *arr marks grab as success
 	w.Header().Set("Content-Type", "application/x-bittorrent")
 	_, _ = w.Write([]byte("d8:announce0:e"))
+}
+
+func (s *Server) dispatchJobToQueue(rawURL, title, cat, customSavePath string) {
+	if !strings.HasPrefix(rawURL, "bridge://") {
+		return
+	}
+
+	go func() {
+		bgCtx := context.Background()
+		media, err := s.aggregator.GetMediaByURI(bgCtx, rawURL)
+		if err != nil {
+			log.Printf("[Queue Dispatch] Failed to resolve media %s: %v", rawURL, err)
+			return
+		}
+
+		destDir := customSavePath
+		if destDir == "" {
+			if media.Category == "tv" || cat == "tv" {
+				seriesClean := formatter.PickBestEnglishTitle(media.OriginalTitle, "", media.Title)
+				if seriesClean == "" {
+					seriesClean = media.Title
+				}
+				seriesClean = formatter.CleanSeriesName(seriesClean)
+				season := formatter.DetectSeason(media.Title, media.OriginalTitle, title)
+				if season <= 0 {
+					season = 1
+				}
+				destDir = filepath.Join(s.cfg.Storage.TVBaseDir, seriesClean, fmt.Sprintf("Season %02d", season))
+			} else {
+				movieName := formatter.PickBestEnglishTitle(media.OriginalTitle, "", media.Title)
+				if movieName == "" {
+					movieName = media.Title
+				}
+				destDir = filepath.Join(s.cfg.Storage.MovieBaseDir, movieName)
+			}
+		}
+
+		s.queueManager.AddJob(title, rawURL, cat, destDir, media)
+	}()
 }
 
 func (s *Server) handleManualDownload(w http.ResponseWriter, r *http.Request) {

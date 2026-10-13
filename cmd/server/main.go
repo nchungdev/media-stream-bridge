@@ -13,6 +13,7 @@ import (
 	"media-stream-bridge/internal/provider/fshare"
 	"media-stream-bridge/internal/provider/kkphim"
 	"media-stream-bridge/internal/provider/nguonc"
+	"media-stream-bridge/internal/queue"
 	"media-stream-bridge/internal/service"
 	transporthttp "media-stream-bridge/internal/transport/http"
 )
@@ -58,8 +59,17 @@ func main() {
 	// Initialize Downloader
 	dl := downloader.NewEngine(cfg.Storage.DefaultDownloadDir)
 
+	// Initialize Central Queue Manager (2 concurrent workers)
+	sonarrNotify := func(seriesID int) {
+		dl.NotifySonarrRefresh(cfg.Arr.SonarrURL, cfg.Arr.SonarrAPIKey, seriesID)
+	}
+	radarrNotify := func(movieID int) {
+		dl.NotifySonarrRefresh(cfg.Arr.RadarrURL, cfg.Arr.RadarrAPIKey, movieID)
+	}
+	qm := queue.NewManager(2, sonarrNotify, radarrNotify)
+
 	// Initialize HTTP Server
-	server := transporthttp.NewServer(cfg, agg, dl)
+	server := transporthttp.NewServer(cfg, agg, dl, qm)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Printf("[Media Stream Bridge] Starting high-performance Go daemon on %s ...", addr)
