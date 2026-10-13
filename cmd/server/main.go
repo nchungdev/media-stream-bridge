@@ -12,7 +12,6 @@ import (
 	"media-stream-bridge/internal/provider/donghuaweb"
 	"media-stream-bridge/internal/provider/fshare"
 	"media-stream-bridge/internal/provider/kkphim"
-	"media-stream-bridge/internal/provider/nguonc"
 	"media-stream-bridge/internal/queue"
 	"media-stream-bridge/internal/service"
 	transporthttp "media-stream-bridge/internal/transport/http"
@@ -47,14 +46,13 @@ func main() {
 		cfg.Storage.DefaultDownloadDir = "/srv/mergerfs/MainPool/downloads"
 	}
 
-	// Initialize Providers
+	// Initialize Providers (KKPhim direct HLS CDN, YanHH3D, Fshare)
 	kkProvider := kkphim.New()
-	nguonCProvider := nguonc.New()
 	donghuaProvider := donghuaweb.New()
 	fshareProvider := fshare.New()
 
 	// Initialize Aggregator with 6s timeout
-	agg := service.NewAggregator(6*time.Second, kkProvider, nguonCProvider, donghuaProvider, fshareProvider)
+	agg := service.NewAggregator(6*time.Second, kkProvider, donghuaProvider, fshareProvider)
 
 	// Initialize Downloader
 	dl := downloader.NewEngine(cfg.Storage.DefaultDownloadDir)
@@ -74,7 +72,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Printf("[Media Stream Bridge] Starting high-performance Go daemon on %s ...", addr)
 	log.Printf("[Media Stream Bridge] Registered Providers: %s, %s, %s",
-		kkProvider.Name(), nguonCProvider.Name(), donghuaProvider.Name())
+		kkProvider.Name(), donghuaProvider.Name(), fshareProvider.Name())
 
 	if err := http.ListenAndServe(addr, server.Router()); err != nil {
 		log.Fatalf("[Media Stream Bridge] Fatal error: %v", err)
