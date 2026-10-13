@@ -1,0 +1,7 @@
+.git
+.github
+*.md
+docker-compose*.yml
+config.json
+media-stream-bridge
+*.test

@@ -1,0 +1,13 @@
+services:
+  media-stream-bridge:
+    image: ghcr.io/nchungdev/media-stream-bridge:latest
+    container_name: media-stream-bridge
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+      - MEDIA_STREAM_CONFIG=/config/config.json
+    volumes:
+      - /etc/fshare-bridge/config.json:/config/config.json:ro
+      - /srv/mergerfs/MainPool/Phim:/srv/mergerfs/MainPool/Phim
+      - /srv/mergerfs/MainPool/downloads:/srv/mergerfs/MainPool/downloads
