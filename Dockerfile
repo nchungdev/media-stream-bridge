@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.27-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS builder
 
 WORKDIR /app
 
@@ -11,26 +11,24 @@ RUN go mod download
 COPY . .
 
 # Build statically linked binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o media-stream-bridge ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-w -s" -o media-stream-bridge ./cmd/server
 
 # Final runtime image
-FROM alpine:3.20
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
-# Install runtime dependencies for streaming and downloading
-RUN apk add --no-cache \
-    ca-certificates \
-    tzdata \
-    ffmpeg \
-    yt-dlp \
-    curl
+# ffmpeg is the only runtime tool. FFmpeg < 8.1.2 is vulnerable to
+# CVE-2026-8461 (PixelSmash), so the build fails if the repo ships less than 8.1.3.
+RUN apk add --no-cache ca-certificates tzdata ffmpeg \
+    && ffmpeg -version | head -1 \
+    && v="$(ffmpeg -version | head -1 | awk '{print $3}')" \
+    && [ "$(printf '%s\n8.1.3\n' "$v" | sort -V | head -1)" = "8.1.3" ] \
+    || { echo "ffmpeg >= 8.1.3 required" >&2; exit 1; }
 
-WORKDIR /app
+RUN adduser -D -u 1000 -G users app
 
-# Copy binary from builder
 COPY --from=builder /app/media-stream-bridge /usr/local/bin/media-stream-bridge
 
-# Create standard directories
-RUN mkdir -p /config /downloads /media
+USER 1000:100
 
 EXPOSE 6890
 

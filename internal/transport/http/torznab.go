@@ -2,7 +2,7 @@ package http
 
 import (
 	"encoding/xml"
-	"fmt"
+	"net/url"
 	"time"
 
 	"media-stream-bridge/internal/domain"
@@ -126,7 +126,9 @@ type TorznabAttr struct {
 	Value string `xml:"value,attr"`
 }
 
-func GenerateRSSXML(results []domain.SearchResult, hostURL string) ([]byte, error) {
+// GenerateRSSXML renders Torznab RSS. Enclosure links carry the API key so the
+// follow-up GET /torznab/download passes authentication.
+func GenerateRSSXML(results []domain.SearchResult, hostURL, apiKey string) ([]byte, error) {
 	feed := RSSFeed{
 		Version:      "2.0",
 		XMLNSTorznab: "http://torznab.com/schemas/2015/feed",
@@ -138,8 +140,12 @@ func GenerateRSSXML(results []domain.SearchResult, hostURL string) ([]byte, erro
 	}
 
 	for _, res := range results {
-		downloadURL := fmt.Sprintf("%s/torznab/download?url=%s&title=%s&cat=%s",
-			hostURL, res.DownloadURL, res.Title, res.Category)
+		q := url.Values{}
+		q.Set("url", res.DownloadURL)
+		q.Set("title", res.Title)
+		q.Set("cat", res.Category)
+		q.Set("apikey", apiKey)
+		downloadURL := hostURL + "/torznab/download?" + q.Encode()
 
 		catID := "5000"
 		if res.Category == "movie" {
