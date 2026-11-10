@@ -9,10 +9,10 @@ import (
 )
 
 type ServerCaps struct {
-	XMLName   xml.Name `xml:"caps"`
-	Server    CapsServer `xml:"server"`
-	Limits    Limits     `xml:"limits"`
-	Searching Search     `xml:"searching"`
+	XMLName    xml.Name   `xml:"caps"`
+	Server     CapsServer `xml:"server"`
+	Limits     Limits     `xml:"limits"`
+	Searching  Search     `xml:"searching"`
 	Categories Categories `xml:"categories"`
 }
 
@@ -108,10 +108,10 @@ type RSSChannel struct {
 }
 
 type RSSItem struct {
-	Title       string        `xml:"title"`
-	GUID        string        `xml:"guid"`
-	PubDate     string        `xml:"pubDate"`
-	Enclosure   RSSEnclosure  `xml:"enclosure"`
+	Title        string        `xml:"title"`
+	GUID         string        `xml:"guid"`
+	PubDate      string        `xml:"pubDate"`
+	Enclosure    RSSEnclosure  `xml:"enclosure"`
 	TorznabAttrs []TorznabAttr `xml:"torznab:attr"`
 }
 

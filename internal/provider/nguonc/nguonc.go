@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -11,6 +12,9 @@ import (
 	"media-stream-bridge/internal/domain"
 	"media-stream-bridge/internal/formatter"
 )
+
+// maxBodyBytes caps how much of a provider response is read.
+const maxBodyBytes = 5 << 20
 
 type Provider struct {
 	client  *http.Client
@@ -58,7 +62,7 @@ func (p *Provider) Search(ctx context.Context, query string) ([]domain.SearchRes
 	}
 
 	var data searchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&data); err != nil {
 		return nil, err
 	}
 
@@ -122,7 +126,7 @@ func (p *Provider) GetMedia(ctx context.Context, slug string) (*domain.MediaItem
 	}
 
 	var data filmResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&data); err != nil {
 		return nil, err
 	}
 

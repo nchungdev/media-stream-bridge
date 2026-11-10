@@ -15,6 +15,9 @@ import (
 	"media-stream-bridge/internal/domain"
 )
 
+// maxBodyBytes caps how much of a provider response is read.
+const maxBodyBytes = 5 << 20
+
 type Provider struct {
 	client  *http.Client
 	baseURL string
@@ -51,7 +54,7 @@ func (p *Provider) Search(ctx context.Context, query string) ([]domain.SearchRes
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +106,7 @@ func (p *Provider) GetMedia(ctx context.Context, slug string) (*domain.MediaItem
 			continue
 		}
 
-		bodyBytes, err := io.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		resp.Body.Close()
 		if err != nil {
 			continue
@@ -137,10 +140,10 @@ func (p *Provider) GetMedia(ctx context.Context, slug string) (*domain.MediaItem
 		for _, n := range epNums {
 			epURL := epMap[n]
 			item.Episodes = append(item.Episodes, domain.Episode{
-				Slug:      fmt.Sprintf("tap-%d", n),
-				Name:      fmt.Sprintf("Tập %d", n),
-				EmbedURL:  epURL,
-				Quality:   "1080p",
+				Slug:     fmt.Sprintf("tap-%d", n),
+				Name:     fmt.Sprintf("Tập %d", n),
+				EmbedURL: epURL,
+				Quality:  "1080p",
 			})
 		}
 

@@ -3,11 +3,13 @@ package http
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 )
 
-func (s *Server) setupDashboardRoutes() {
-	s.router.Get("/dashboard", s.handleDashboardHTML)
-	s.router.Get("/api/queue", s.handleAPIQueue)
+func (s *Server) setupDashboardRoutes(r chi.Router) {
+	r.Get("/dashboard", s.handleDashboardHTML)
+	r.Get("/api/queue", s.handleAPIQueue)
 }
 
 func (s *Server) handleAPIQueue(w http.ResponseWriter, r *http.Request) {
@@ -21,6 +23,7 @@ func (s *Server) handleAPIQueue(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDashboardHTML(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setDashboardHeaders(w)
 	_, _ = w.Write([]byte(dashboardHTML))
 }
 
@@ -83,7 +86,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <svg class="w-4 h-4 mr-2 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path></svg>
         Download Queue
       </h2>
-      <button onclick="fetchQueue()" class="text-xs text-cyan-400 hover:text-cyan-300 transition flex items-center">
+      <button id="refresh-btn" class="text-xs text-cyan-400 hover:text-cyan-300 transition flex items-center">
         <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
         Refresh
       </button>
@@ -110,6 +113,10 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 
   <script>
+    function esc(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
     function formatBytes(bytes) {
       if (!bytes || bytes === 0) return '0 B';
       const k = 1024, dm = 2, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -158,18 +165,18 @@ const dashboardHTML = `<!DOCTYPE html>
         else if (j.state === 'paused') badge = '<span class="px-2 py-0.5 rounded text-xs bg-amber-950 text-amber-400 border border-amber-800">Paused</span>';
 
         html += '<tr class="hover:bg-slate-800/20 transition">';
-        html += '<td class="p-3 pl-4 font-medium text-slate-200">' + j.title + '<div class="text-xs text-slate-500 font-mono mt-0.5">' + (j.save_path || '') + '</div></td>';
-        html += '<td class="p-3 text-xs uppercase text-slate-400 font-semibold">' + (j.category || 'tv') + '</td>';
+        html += '<td class="p-3 pl-4 font-medium text-slate-200">' + esc(j.title) + '<div class="text-xs text-slate-500 font-mono mt-0.5">' + esc(j.save_path) + '</div></td>';
+        html += '<td class="p-3 text-xs uppercase text-slate-400 font-semibold">' + esc(j.category || 'tv') + '</td>';
         html += '<td class="p-3">' + badge + '</td>';
         html += '<td class="p-3"><div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden"><div class="bg-cyan-500 h-2 rounded-full progress-bar" style="width: ' + pct + '%"></div></div><div class="text-xs text-slate-400 mt-1">' + pct + '% (' + formatBytes(j.done_bytes) + ' / ' + formatBytes(j.total_bytes) + ')</div></td>';
         html += '<td class="p-3 text-xs text-slate-400">' + (j.state === 'downloading' ? formatBytes(j.speed_bytes) + '/s • ETA ' + formatTime(j.eta) : '--') + '</td>';
         html += '<td class="p-3 text-right pr-4 space-x-1">';
         if (j.state === 'downloading') {
-          html += '<button onclick="pauseJob(\'' + j.hash + '\')" class="p-1 text-slate-400 hover:text-amber-400 transition" title="Pause"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></button>';
+          html += '<button data-action="pause" data-hash="' + esc(j.hash) + '" class="p-1 text-slate-400 hover:text-amber-400 transition" title="Pause"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></button>';
         } else if (j.state === 'paused') {
-          html += '<button onclick="resumeJob(\'' + j.hash + '\')" class="p-1 text-slate-400 hover:text-cyan-400 transition" title="Resume"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></button>';
+          html += '<button data-action="resume" data-hash="' + esc(j.hash) + '" class="p-1 text-slate-400 hover:text-cyan-400 transition" title="Resume"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></button>';
         }
-        html += '<button onclick="deleteJob(\'' + j.hash + '\')" class="p-1 text-slate-400 hover:text-rose-400 transition" title="Delete"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>';
+        html += '<button data-action="delete" data-hash="' + esc(j.hash) + '" class="p-1 text-slate-400 hover:text-rose-400 transition" title="Delete"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>';
         html += '</td></tr>';
       });
 
@@ -202,6 +209,14 @@ const dashboardHTML = `<!DOCTYPE html>
       await fetch('/api/v2/torrents/delete', { method: 'POST', body: form });
       fetchQueue();
     }
+
+    document.getElementById('refresh-btn').addEventListener('click', fetchQueue);
+    document.getElementById('queue-body').addEventListener('click', e => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const actions = { pause: pauseJob, resume: resumeJob, delete: deleteJob };
+      actions[btn.dataset.action](btn.dataset.hash);
+    });
 
     fetchQueue();
     setInterval(fetchQueue, 2000);

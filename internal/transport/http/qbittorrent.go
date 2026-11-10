@@ -2,52 +2,36 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+
 	"media-stream-bridge/internal/queue"
 )
 
 // setupQBittorrentRoutes registers qBittorrent WebAPI v2 compatible routes for Sonarr/Radarr.
-func (s *Server) setupQBittorrentRoutes() {
-	// Authentication
-	s.router.Post("/api/v2/auth/login", s.handleQBitLogin)
-	s.router.Post("/api/v2/auth/logout", s.handleQBitLogout)
+// Login itself is public and registered separately.
+func (s *Server) setupQBittorrentRoutes(r chi.Router) {
+	r.Post("/api/v2/auth/logout", s.handleQBitLogout)
 
 	// App information
-	s.router.Get("/api/v2/app/version", s.handleQBitVersion)
-	s.router.Get("/api/v2/app/webapiVersion", s.handleQBitWebAPIVersion)
-	s.router.Get("/api/v2/app/preferences", s.handleQBitPreferences)
+	r.Get("/api/v2/app/version", s.handleQBitVersion)
+	r.Get("/api/v2/app/webapiVersion", s.handleQBitWebAPIVersion)
+	r.Get("/api/v2/app/preferences", s.handleQBitPreferences)
 
 	// Torrents management
-	s.router.Get("/api/v2/torrents/info", s.handleQBitTorrentsInfo)
-	s.router.Post("/api/v2/torrents/add", s.handleQBitTorrentsAdd)
-	s.router.Post("/api/v2/torrents/delete", s.handleQBitTorrentsDelete)
-	s.router.Post("/api/v2/torrents/pause", s.handleQBitTorrentsPause)
-	s.router.Post("/api/v2/torrents/resume", s.handleQBitTorrentsResume)
-	s.router.Get("/api/v2/torrents/categories", s.handleQBitCategories)
-}
-
-func (s *Server) handleQBitLogin(w http.ResponseWriter, r *http.Request) {
-	// Accept any credentials or validate against configured api_key
-	cookie := &http.Cookie{
-		Name:     "SID",
-		Value:    "media-stream-bridge-session-sid",
-		Path:     "/",
-		HttpOnly: true,
-		MaxAge:   86400 * 30,
-	}
-	http.SetCookie(w, cookie)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("Ok."))
-}
-
-func (s *Server) handleQBitLogout(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("Ok."))
+	r.Get("/api/v2/torrents/info", s.handleQBitTorrentsInfo)
+	r.Post("/api/v2/torrents/add", s.handleQBitTorrentsAdd)
+	r.Post("/api/v2/torrents/delete", s.handleQBitTorrentsDelete)
+	r.Post("/api/v2/torrents/pause", s.handleQBitTorrentsPause)
+	r.Post("/api/v2/torrents/resume", s.handleQBitTorrentsResume)
+	r.Get("/api/v2/torrents/categories", s.handleQBitCategories)
 }
 
 func (s *Server) handleQBitVersion(w http.ResponseWriter, r *http.Request) {
@@ -63,12 +47,12 @@ func (s *Server) handleQBitWebAPIVersion(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleQBitPreferences(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"save_path":               s.cfg.Storage.DefaultDownloadDir,
-		"temp_path":               s.cfg.Storage.DefaultDownloadDir,
-		"queueing_enabled":        true,
-		"max_active_downloads":    2,
-		"max_active_torrents":     5,
-		"max_active_uploads":      5,
+		"save_path":                      s.cfg.Storage.DefaultDownloadDir,
+		"temp_path":                      s.cfg.Storage.DefaultDownloadDir,
+		"queueing_enabled":               true,
+		"max_active_downloads":           2,
+		"max_active_torrents":            5,
+		"max_active_uploads":             5,
 		"slow_torrent_dl_rate_threshold": 0,
 	})
 }
@@ -85,48 +69,48 @@ func (s *Server) handleQBitCategories(w http.ResponseWriter, r *http.Request) {
 
 // qBitTorrentItem matches qBittorrent's JSON representation for Sonarr / Radarr
 type qBitTorrentItem struct {
-	AddedOn           int64   `json:"added_on"`
-	AmountLeft        int64   `json:"amount_left"`
-	AutoTmm           bool    `json:"auto_tmm"`
-	Category          string  `json:"category"`
-	Completed         int64   `json:"completed"`
-	CompletionOn      int64   `json:"completion_on"`
-	ContentPath       string  `json:"content_path"`
-	DlSpeed           int64   `json:"dlspeed"`
-	DownloadPath      string  `json:"download_path"`
-	Downloaded        int64   `json:"downloaded"`
-	ETA               int64   `json:"eta"`
-	FLPiecePrio       bool    `json:"f_l_piece_prio"`
-	ForceStart        bool    `json:"force_start"`
-	Hash              string  `json:"hash"`
-	LastActivity      int64   `json:"last_activity"`
-	MagnetURI         string  `json:"magnet_uri"`
-	MaxRatio          float64 `json:"max_ratio"`
-	MaxSeedingTime    int64   `json:"max_seeding_time"`
-	Name              string  `json:"name"`
-	NumComplete       int     `json:"num_complete"`
-	NumIncomplete     int     `json:"num_incomplete"`
-	NumLeechs         int     `json:"num_leechs"`
-	NumSeeds          int     `json:"num_seeds"`
-	Priority          int     `json:"priority"`
-	Progress          float64 `json:"progress"`
-	Ratio             float64 `json:"ratio"`
-	RatioLimit        float64 `json:"ratio_limit"`
-	SavePath          string  `json:"save_path"`
-	SeedingTime       int64   `json:"seeding_time"`
-	SeedingTimeLimit  int64   `json:"seeding_time_limit"`
-	SeenComplete      int64   `json:"seen_complete"`
-	SeqDl             bool    `json:"seq_dl"`
-	Size              int64   `json:"size"`
-	State             string  `json:"state"`
-	SuperSeeding      bool    `json:"super_seeding"`
-	Tags              string  `json:"tags"`
-	TimeActive        int64   `json:"time_active"`
-	TotalSize         int64   `json:"total_size"`
-	Tracker           string  `json:"tracker"`
-	UpLimit           int64   `json:"up_limit"`
-	Uploaded          int64   `json:"uploaded"`
-	UpSpeed           int64   `json:"upspeed"`
+	AddedOn          int64   `json:"added_on"`
+	AmountLeft       int64   `json:"amount_left"`
+	AutoTmm          bool    `json:"auto_tmm"`
+	Category         string  `json:"category"`
+	Completed        int64   `json:"completed"`
+	CompletionOn     int64   `json:"completion_on"`
+	ContentPath      string  `json:"content_path"`
+	DlSpeed          int64   `json:"dlspeed"`
+	DownloadPath     string  `json:"download_path"`
+	Downloaded       int64   `json:"downloaded"`
+	ETA              int64   `json:"eta"`
+	FLPiecePrio      bool    `json:"f_l_piece_prio"`
+	ForceStart       bool    `json:"force_start"`
+	Hash             string  `json:"hash"`
+	LastActivity     int64   `json:"last_activity"`
+	MagnetURI        string  `json:"magnet_uri"`
+	MaxRatio         float64 `json:"max_ratio"`
+	MaxSeedingTime   int64   `json:"max_seeding_time"`
+	Name             string  `json:"name"`
+	NumComplete      int     `json:"num_complete"`
+	NumIncomplete    int     `json:"num_incomplete"`
+	NumLeechs        int     `json:"num_leechs"`
+	NumSeeds         int     `json:"num_seeds"`
+	Priority         int     `json:"priority"`
+	Progress         float64 `json:"progress"`
+	Ratio            float64 `json:"ratio"`
+	RatioLimit       float64 `json:"ratio_limit"`
+	SavePath         string  `json:"save_path"`
+	SeedingTime      int64   `json:"seeding_time"`
+	SeedingTimeLimit int64   `json:"seeding_time_limit"`
+	SeenComplete     int64   `json:"seen_complete"`
+	SeqDl            bool    `json:"seq_dl"`
+	Size             int64   `json:"size"`
+	State            string  `json:"state"`
+	SuperSeeding     bool    `json:"super_seeding"`
+	Tags             string  `json:"tags"`
+	TimeActive       int64   `json:"time_active"`
+	TotalSize        int64   `json:"total_size"`
+	Tracker          string  `json:"tracker"`
+	UpLimit          int64   `json:"up_limit"`
+	Uploaded         int64   `json:"uploaded"`
+	UpSpeed          int64   `json:"upspeed"`
 }
 
 func (s *Server) handleQBitTorrentsInfo(w http.ResponseWriter, r *http.Request) {
@@ -202,39 +186,101 @@ func (s *Server) handleQBitTorrentsInfo(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(items)
 }
 
+const (
+	maxAddURLs       = 50
+	maxMultipartMem  = 1 << 20
+	maxTorrentUpload = 4096
+)
+
 func (s *Server) handleQBitTorrentsAdd(w http.ResponseWriter, r *http.Request) {
-	_ = r.ParseMultipartForm(32 << 20)
+	if err := r.ParseMultipartForm(maxMultipartMem); err != nil && !errors.Is(err, http.ErrNotMultipart) {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
 
 	urlsRaw := r.FormValue("urls")
 	category := r.FormValue("category")
 	savepath := r.FormValue("savepath")
 
-	log.Printf("[qBit Mock Add] Received add request. urls: %s, category: %s, savepath: %s", urlsRaw, category, savepath)
+	log.Printf("[qBit Mock Add] Received add request. urls: %s, category: %s, savepath: %s",
+		redactAPIKey(urlsRaw), category, savepath)
 
-	lines := strings.Split(urlsRaw, "\n")
-	for _, rawLine := range lines {
-		rawLine = strings.TrimSpace(rawLine)
-		if rawLine == "" {
-			continue
-		}
-
-		// Check if it's a bridge download URL or bridge URI
-		parsedURL, err := url.Parse(rawLine)
-		if err == nil && strings.Contains(parsedURL.Path, "/torznab/download") {
-			targetURL := parsedURL.Query().Get("url")
-			title := parsedURL.Query().Get("title")
-			cat := parsedURL.Query().Get("cat")
-			if cat != "" {
-				category = cat
-			}
-			s.dispatchJobToQueue(targetURL, title, category, savepath)
-		} else if strings.HasPrefix(rawLine, "bridge://") {
-			s.dispatchJobToQueue(rawLine, "Media Stream Grab", category, savepath)
+	var lines []string
+	for _, l := range strings.Split(urlsRaw, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
 		}
 	}
+	if len(lines) > maxAddURLs {
+		http.Error(w, "Fails.", http.StatusRequestEntityTooLarge)
+		return
+	}
 
-	w.WriteHeader(http.StatusOK)
+	accepted := 0
+	for _, line := range lines {
+		target, title, cat, ok := parseBridgeLine(line)
+		if !ok {
+			continue // magnets and .torrent URLs are never fetched
+		}
+		if cat == "" {
+			cat = category
+		}
+		if err := s.dispatchJob(r.Context(), target, title, cat, savepath); err != nil {
+			log.Printf("[qBit Mock Add] Failed to queue %q: %v", title, err)
+			_, _ = w.Write([]byte("Fails."))
+			return
+		}
+		accepted++
+	}
+
+	// Sonarr/Radarr upload the placeholder torrent served by /torznab/download
+	// after the real job was queued there; accept exactly that payload.
+	if accepted == 0 && !hasPlaceholderTorrent(r) {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		_, _ = w.Write([]byte("Fails."))
+		return
+	}
+
 	_, _ = w.Write([]byte("Ok."))
+}
+
+// parseBridgeLine extracts the bridge:// target from either a bare bridge URI
+// or a /torznab/download link.
+func parseBridgeLine(line string) (target, title, cat string, ok bool) {
+	if strings.HasPrefix(line, "bridge://") {
+		return line, "Media Stream Grab", "", true
+	}
+	u, err := url.Parse(line)
+	if err != nil || !strings.Contains(u.Path, "/torznab/download") {
+		return "", "", "", false
+	}
+	q := u.Query()
+	target = q.Get("url")
+	if !strings.HasPrefix(target, "bridge://") {
+		return "", "", "", false
+	}
+	return target, q.Get("title"), q.Get("cat"), true
+}
+
+func hasPlaceholderTorrent(r *http.Request) bool {
+	if r.MultipartForm == nil {
+		return false
+	}
+	for _, fh := range r.MultipartForm.File["torrents"] {
+		if fh.Size > maxTorrentUpload {
+			continue
+		}
+		f, err := fh.Open()
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(io.LimitReader(f, maxTorrentUpload))
+		_ = f.Close()
+		if string(data) == dummyTorrent {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleQBitTorrentsDelete(w http.ResponseWriter, r *http.Request) {

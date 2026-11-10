@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +14,9 @@ import (
 	"media-stream-bridge/internal/domain"
 	"media-stream-bridge/internal/formatter"
 )
+
+// maxBodyBytes caps how much of a provider response is read.
+const maxBodyBytes = 5 << 20
 
 type Provider struct {
 	client  *http.Client
@@ -34,14 +38,14 @@ type searchResponse struct {
 	Status bool `json:"status"`
 	Data   struct {
 		Items []struct {
-			ID            string `json:"_id"`
-			Name          string `json:"name"`
-			Slug          string `json:"slug"`
-			OriginalName  string `json:"origin_name"`
-			Year          int    `json:"year"`
-			PosterURL     string `json:"poster_url"`
-			ThumbURL      string `json:"thumb_url"`
-			Type          string `json:"type"`
+			ID           string `json:"_id"`
+			Name         string `json:"name"`
+			Slug         string `json:"slug"`
+			OriginalName string `json:"origin_name"`
+			Year         int    `json:"year"`
+			PosterURL    string `json:"poster_url"`
+			ThumbURL     string `json:"thumb_url"`
+			Type         string `json:"type"`
 		} `json:"items"`
 	} `json:"data"`
 }
@@ -65,7 +69,7 @@ func (p *Provider) Search(ctx context.Context, query string) ([]domain.SearchRes
 	}
 
 	var data searchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&data); err != nil {
 		return nil, err
 	}
 
@@ -128,7 +132,7 @@ func (p *Provider) GetMedia(ctx context.Context, slug string) (*domain.MediaItem
 	}
 
 	var detail detailResponse
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&detail); err != nil {
 		return nil, err
 	}
 

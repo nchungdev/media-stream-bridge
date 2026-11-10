@@ -1,14 +1,15 @@
 package main
 
 import (
-	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"syscall"
 	"time"
 
 	"media-stream-bridge/internal/config"
-	"media-stream-bridge/internal/downloader"
 	"media-stream-bridge/internal/provider/donghuaweb"
 	"media-stream-bridge/internal/provider/fshare"
 	"media-stream-bridge/internal/provider/kkphim"
@@ -18,6 +19,8 @@ import (
 )
 
 func main() {
+	syscall.Umask(0o002)
+
 	var configPath string
 	candidates := []string{
 		os.Getenv("MEDIA_STREAM_CONFIG"),
@@ -37,13 +40,14 @@ func main() {
 
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		log.Printf("[Warn] Could not load config from %v: %v. Using defaults.", configPath, err)
-		cfg = &config.Config{}
-		cfg.Server.Host = "0.0.0.0"
-		cfg.Server.Port = 6890
-		cfg.Storage.TVBaseDir = "/srv/mergerfs/MainPool/Phim/TV Shows"
-		cfg.Storage.MovieBaseDir = "/srv/mergerfs/MainPool/Phim/Movies"
-		cfg.Storage.DefaultDownloadDir = "/srv/mergerfs/MainPool/downloads"
+		log.Printf("[Warn] Could not load config from %q: %v. Using defaults.", configPath, err)
+		cfg = config.Default()
+	}
+	if err := cfg.ApplyEnv(); err != nil {
+		log.Fatalf("[Media Stream Bridge] Invalid configuration: %v", err)
+	}
+	if err := os.MkdirAll(cfg.Storage.DefaultDownloadDir, 0o775); err != nil {
+		log.Printf("[Warn] Cannot create download dir %s: %v", cfg.Storage.DefaultDownloadDir, err)
 	}
 
 	// Initialize Providers (KKPhim direct HLS CDN, YanHH3D, Fshare)
@@ -54,27 +58,32 @@ func main() {
 	// Initialize Aggregator with 6s timeout
 	agg := service.NewAggregator(6*time.Second, kkProvider, donghuaProvider, fshareProvider)
 
-	// Initialize Downloader
-	dl := downloader.NewEngine(cfg.Storage.DefaultDownloadDir)
-
 	// Initialize Central Queue Manager (2 concurrent workers)
-	sonarrNotify := func(seriesID int) {
-		dl.NotifySonarrRefresh(cfg.Arr.SonarrURL, cfg.Arr.SonarrAPIKey, seriesID)
-	}
-	radarrNotify := func(movieID int) {
-		dl.NotifySonarrRefresh(cfg.Arr.RadarrURL, cfg.Arr.RadarrAPIKey, movieID)
-	}
-	qm := queue.NewManager(2, sonarrNotify, radarrNotify)
+	qm := queue.NewManager(queue.Options{
+		MaxConcurrent:  2,
+		MaxJobs:        cfg.MaxJobs,
+		EpisodeTimeout: cfg.EpisodeTimeout,
+		BaseDir:        cfg.Storage.DefaultDownloadDir,
+	})
 
 	// Initialize HTTP Server
-	server := transporthttp.NewServer(cfg, agg, dl, qm)
+	server := transporthttp.NewServer(cfg, agg, qm)
 
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	addr := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
 	log.Printf("[Media Stream Bridge] Starting high-performance Go daemon on %s ...", addr)
 	log.Printf("[Media Stream Bridge] Registered Providers: %s, %s, %s",
 		kkProvider.Name(), donghuaProvider.Name(), fshareProvider.Name())
 
-	if err := http.ListenAndServe(addr, server.Router()); err != nil {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           server.Router(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("[Media Stream Bridge] Fatal error: %v", err)
 	}
 }
