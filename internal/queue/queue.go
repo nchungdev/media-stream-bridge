@@ -1,23 +1,21 @@
 package queue
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"media-stream-bridge/internal/domain"
 	"media-stream-bridge/internal/formatter"
+	"media-stream-bridge/internal/pathsafe"
 )
 
 type JobState string
@@ -58,7 +56,18 @@ type Job struct {
 	Media       *domain.MediaItem `json:"media,omitempty"`
 	Episodes    []EpisodeProgress `json:"episodes,omitempty"`
 
+	// Files lists every file this job created, so deletion never touches anything else.
+	Files []string `json:"-"`
+
 	cancel context.CancelFunc `json:"-"`
+}
+
+// Options configures a Manager.
+type Options struct {
+	MaxConcurrent  int
+	MaxJobs        int
+	EpisodeTimeout time.Duration
+	BaseDir        string // download root; jobs may only write below it
 }
 
 type Manager struct {
@@ -67,20 +76,28 @@ type Manager struct {
 	queueOrder    []string        // list of Hashes in order
 	maxConcurrent int
 	activeWorkers int
-	notifySonarr  func(seriesID int)
-	notifyRadarr  func(movieID int)
+	maxJobs       int
+	episodeTO     time.Duration
+	baseDir       string
 }
 
-func NewManager(maxConcurrent int, sonarrNotifier, radarrNotifier func(id int)) *Manager {
-	if maxConcurrent <= 0 {
-		maxConcurrent = 2
+func NewManager(opts Options) *Manager {
+	if opts.MaxConcurrent <= 0 {
+		opts.MaxConcurrent = 2
+	}
+	if opts.MaxJobs <= 0 {
+		opts.MaxJobs = 200
+	}
+	if opts.EpisodeTimeout <= 0 {
+		opts.EpisodeTimeout = 3 * time.Hour
 	}
 	m := &Manager{
 		jobs:          make(map[string]*Job),
 		queueOrder:    make([]string, 0),
-		maxConcurrent: maxConcurrent,
-		notifySonarr:  sonarrNotifier,
-		notifyRadarr:  radarrNotifier,
+		maxConcurrent: opts.MaxConcurrent,
+		maxJobs:       opts.MaxJobs,
+		episodeTO:     opts.EpisodeTimeout,
+		baseDir:       opts.BaseDir,
 	}
 	go m.workerLoop()
 	return m
@@ -92,13 +109,19 @@ func GenerateHash(text string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (m *Manager) AddJob(title, uri, category, savePath string, media *domain.MediaItem) *Job {
+// ErrQueueFull is returned by AddJob when MaxJobs is reached.
+var ErrQueueFull = errors.New("queue is full")
+
+func (m *Manager) AddJob(title, uri, category, savePath string, media *domain.MediaItem) (*Job, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	hash := GenerateHash(fmt.Sprintf("%s|%s", title, uri))
 	if existing, found := m.jobs[hash]; found {
-		return existing
+		return existing, nil
+	}
+	if len(m.jobs) >= m.maxJobs {
+		return nil, ErrQueueFull
 	}
 
 	job := &Job{
@@ -130,7 +153,7 @@ func (m *Manager) AddJob(title, uri, category, savePath string, media *domain.Me
 	m.jobs[hash] = job
 	m.queueOrder = append(m.queueOrder, hash)
 	log.Printf("[Queue] Added job %s: '%s' (hash: %s)", job.ID, job.Title, job.Hash)
-	return job
+	return job, nil
 }
 
 func (m *Manager) GetAllJobs() []*Job {
@@ -166,8 +189,8 @@ func (m *Manager) DeleteJob(hash string, deleteFiles bool) {
 		job.cancel()
 	}
 
-	if deleteFiles && job.SavePath != "" {
-		_ = os.RemoveAll(job.SavePath)
+	if deleteFiles {
+		m.removeJobFiles(job)
 	}
 
 	delete(m.jobs, hash)
@@ -250,13 +273,14 @@ func (m *Manager) executeJob(ctx context.Context, job *Job) {
 	}()
 
 	log.Printf("[Worker] Starting processing job: '%s' into '%s'", job.Title, job.SavePath)
-	_ = os.MkdirAll(job.SavePath, 0755)
+	if !pathsafe.Within(m.baseDir, job.SavePath) {
+		m.failJob(job, "save path outside the download directory")
+		return
+	}
+	_ = os.MkdirAll(job.SavePath, 0o775)
 
 	if job.Media == nil || len(job.Media.Episodes) == 0 {
-		m.mu.Lock()
-		job.State = StateError
-		job.ErrorMsg = "No streamable episodes found"
-		m.mu.Unlock()
+		m.failJob(job, "No streamable episodes found")
 		return
 	}
 
@@ -271,29 +295,7 @@ func (m *Manager) executeJob(ctx context.Context, job *Job) {
 		default:
 		}
 
-		// Calculate target episode file name
-		var fileName string
-		if job.Category == "tv" {
-			season := formatter.DetectSeason(job.Media.Title, job.Media.OriginalTitle, job.Title)
-			epNum := formatter.DetectEpisodeNum(ep.Name, ep.Slug)
-			seriesClean := formatter.PickBestEnglishTitle(job.Media.OriginalTitle, "", job.Media.Title)
-			if seriesClean == "" {
-				seriesClean = job.Media.Title
-			}
-			seriesClean = formatter.CleanSeriesName(seriesClean)
-			fileName = formatter.BuildEpisodeFileName(seriesClean, season, epNum)
-		} else {
-			movieClean := formatter.PickBestEnglishTitle(job.Media.OriginalTitle, "", job.Media.Title)
-			if movieClean == "" {
-				movieClean = job.Media.Title
-			}
-			if job.Media.Year > 0 {
-				fileName = fmt.Sprintf("%s (%d).mp4", movieClean, job.Media.Year)
-			} else {
-				fileName = fmt.Sprintf("%s.mp4", movieClean)
-			}
-		}
-
+		fileName := m.episodeFileName(job, ep)
 		outFilePath := filepath.Join(job.SavePath, fileName)
 		if job.ContentPath == "" {
 			job.ContentPath = outFilePath
@@ -316,6 +318,8 @@ func (m *Manager) executeJob(ctx context.Context, job *Job) {
 			log.Printf("[Worker] Episode %s has no URL, skipping", ep.Name)
 			continue
 		}
+
+		m.trackFile(job, outFilePath)
 
 		// Download episode via ffmpeg stream copy with progress pipe
 		err := m.downloadEpisodeWithFFmpeg(ctx, job, streamURL, outFilePath, i, totalEps, completedEps)
@@ -344,14 +348,12 @@ func (m *Manager) executeJob(ctx context.Context, job *Job) {
 	m.mu.Unlock()
 
 	log.Printf("[Worker] Job successfully completed: %s", job.Title)
+}
 
-	// Notify Sonarr/Radarr
-	if m.notifySonarr != nil && job.Category == "tv" {
-		m.notifySonarr(0)
-	}
-	if m.notifyRadarr != nil && job.Category == "movie" {
-		m.notifyRadarr(0)
-	}
+func (m *Manager) trackFile(job *Job, path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job.Files = append(job.Files, path)
 }
 
 func (m *Manager) updateJobProgress(job *Job, completedCount, totalCount, epIdx int, epDone bool, speed int64) {
@@ -370,83 +372,56 @@ func (m *Manager) updateJobProgress(job *Job, completedCount, totalCount, epIdx 
 	}
 }
 
-func (m *Manager) downloadEpisodeWithFFmpeg(ctx context.Context, job *Job, streamURL, outPath string, epIdx, totalCount, completedCount int) error {
-	tmpFile := outPath + ".part"
-	_ = os.Remove(tmpFile)
-
-	args := []string{
-		"-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nReferer: https://phimapi.com/\r\n",
-		"-i", streamURL,
-		"-c", "copy",
-		"-bsf:a", "aac_adtstoasc",
-		"-f", "mp4",
-		"-progress", "pipe:1",
-		"-y", tmpFile,
-	}
-
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	// Read progress stream from ffmpeg
-	scanner := bufio.NewScanner(stdout)
-	lastUpdate := time.Now()
-	var lastOutBytes int64
-
-	go func() {
-		for scanner.Scan() {
-			line := scanner.Text()
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				k := strings.TrimSpace(parts[0])
-				v := strings.TrimSpace(parts[1])
-				if k == "total_size" {
-					if curBytes, err := strconv.ParseInt(v, 10, 64); err == nil && curBytes > 0 {
-						now := time.Now()
-						dur := now.Sub(lastUpdate).Seconds()
-						if dur >= 1.0 {
-							speed := int64(float64(curBytes-lastOutBytes) / dur)
-							lastOutBytes = curBytes
-							lastUpdate = now
-
-							m.mu.Lock()
-							epWeight := 1.0 / float64(totalCount)
-							curEpRatio := float64(curBytes) / 524288000.0 // estimate 500MB per ep
-							if curEpRatio > 0.95 {
-								curEpRatio = 0.95
-							}
-							job.Progress = (float64(completedCount) * epWeight) + (curEpRatio * epWeight)
-							job.DoneBytes = int64(float64(job.TotalBytes) * job.Progress)
-							job.SpeedBytes = speed
-							if speed > 0 {
-								job.ETA = (job.TotalBytes - job.DoneBytes) / speed
-							}
-							job.UpdatedAt = now
-							if epIdx < len(job.Episodes) {
-								job.Episodes[epIdx].Progress = curEpRatio
-							}
-							m.mu.Unlock()
-						}
-					}
-				}
-			}
-		}
-	}()
-
-	if err := cmd.Wait(); err != nil {
-		_ = os.Remove(tmpFile)
-		return err
-	}
-
-	// Rename .part to final file
-	return os.Rename(tmpFile, outPath)
+func (m *Manager) failJob(job *Job, msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job.State = StateError
+	job.ErrorMsg = msg
 }
 
-// Ensure interface compatibility
-var _ io.Reader = (*bufio.Reader)(nil)
+// episodeFileName builds a sanitized "<name>.mp4" for one episode.
+func (m *Manager) episodeFileName(job *Job, ep domain.Episode) string {
+	title := formatter.PickBestEnglishTitle(job.Media.OriginalTitle, "", job.Media.Title)
+	if title == "" {
+		title = job.Media.Title
+	}
+	var stem string
+	if job.Category == "tv" {
+		season := formatter.DetectSeason(job.Media.Title, job.Media.OriginalTitle, job.Title)
+		epNum := formatter.DetectEpisodeNum(ep.Name, ep.Slug)
+		stem = formatter.BuildEpisodeFileName(formatter.CleanSeriesName(title), season, epNum)
+		stem = strings.TrimSuffix(stem, ".mp4")
+	} else if job.Media.Year > 0 {
+		stem = fmt.Sprintf("%s (%d)", title, job.Media.Year)
+	} else {
+		stem = title
+	}
+	return pathsafe.SafeComponent(stem) + ".mp4"
+}
+
+// removeJobFiles deletes only the files the job created, then prunes the
+// now-empty job directories. It never removes a non-empty directory.
+func (m *Manager) removeJobFiles(job *Job) {
+	for _, f := range job.Files {
+		if !pathsafe.Within(m.baseDir, f) {
+			continue
+		}
+		_ = os.Remove(f)
+		_ = os.Remove(f + ".part")
+	}
+	m.removeIfEmpty(job.SavePath)
+	m.removeIfEmpty(filepath.Dir(job.SavePath))
+}
+
+func (m *Manager) removeIfEmpty(dir string) {
+	dir = filepath.Clean(dir)
+	for _, protected := range []string{m.baseDir, filepath.Join(m.baseDir, "series"), filepath.Join(m.baseDir, "movies")} {
+		if dir == filepath.Clean(protected) {
+			return
+		}
+	}
+	if dir == "" || !pathsafe.Within(m.baseDir, dir) {
+		return
+	}
+	_ = os.Remove(dir) // fails harmlessly when the directory is not empty
+}

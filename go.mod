@@ -1,8 +1,7 @@
 module media-stream-bridge
 
-go 1.24
+go 1.26.0
 
-require (
-	github.com/go-chi/chi/v5 v5.2.1
-	github.com/go-chi/cors v1.2.1
-)
+require github.com/go-chi/chi/v5 v5.5.0
+
+require golang.org/x/text v0.44.0

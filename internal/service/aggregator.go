@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,9 @@ import (
 	"media-stream-bridge/internal/domain"
 	"media-stream-bridge/internal/provider"
 )
+
+// validSlug restricts provider slugs to a single safe path/URL component.
+var validSlug = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$`)
 
 type Aggregator struct {
 	providers []provider.Provider
@@ -87,6 +91,9 @@ func (a *Aggregator) GetMediaByURI(ctx context.Context, uri string) (*domain.Med
 
 	provName := strings.ToLower(parts[0])
 	slug := strings.Join(parts[1:], "/")
+	if !validSlug.MatchString(slug) {
+		return nil, fmt.Errorf("invalid slug in bridge URI")
+	}
 
 	for _, p := range a.providers {
 		if strings.ToLower(p.Name()) == provName {

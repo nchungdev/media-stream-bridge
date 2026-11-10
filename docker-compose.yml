@@ -1,13 +1,29 @@
+# Hardened example. Copy .env.example to .env and fill in real secrets first.
 services:
   media-stream-bridge:
     image: ghcr.io/nchungdev/media-stream-bridge:latest
     container_name: media-stream-bridge
     restart: unless-stopped
     network_mode: host
+    user: "1000:100"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g
+    env_file: .env
     environment:
       - TZ=Asia/Ho_Chi_Minh
       - MEDIA_STREAM_CONFIG=/config/config.json
     volumes:
       - /etc/fshare-bridge/config.json:/config/config.json:ro
-      - /srv/mergerfs/MainPool/Phim:/srv/mergerfs/MainPool/Phim
       - /srv/mergerfs/MainPool/downloads:/srv/mergerfs/MainPool/downloads
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:6890/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

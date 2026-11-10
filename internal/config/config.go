@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"time"
 )
 
 type Config struct {
@@ -35,6 +36,14 @@ type Config struct {
 		MovieBaseDir       string `json:"movie_base_dir"`
 		DefaultDownloadDir string `json:"default_download_dir"`
 	} `json:"storage"`
+
+	// Runtime settings, set from MSB_* environment variables only.
+	QBitUsername   string        `json:"-"`
+	QBitPassword   string        `json:"-"`
+	APIKey         string        `json:"-"`
+	MaxJobs        int           `json:"-"`
+	PublicURL      string        `json:"-"`
+	EpisodeTimeout time.Duration `json:"-"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -49,4 +58,13 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// Default returns the built-in fallback configuration used when no file is found.
+func Default() *Config {
+	cfg := &Config{}
+	cfg.Storage.TVBaseDir = "/srv/mergerfs/MainPool/Phim/TV Shows"
+	cfg.Storage.MovieBaseDir = "/srv/mergerfs/MainPool/Phim/Movies"
+	cfg.Storage.DefaultDownloadDir = "/srv/mergerfs/MainPool/downloads"
+	return cfg
 }

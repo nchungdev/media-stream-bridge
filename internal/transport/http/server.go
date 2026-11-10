@@ -8,33 +8,40 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 
 	"media-stream-bridge/internal/config"
-	"media-stream-bridge/internal/downloader"
 	"media-stream-bridge/internal/formatter"
+	"media-stream-bridge/internal/pathsafe"
 	"media-stream-bridge/internal/queue"
 	"media-stream-bridge/internal/service"
+)
+
+const (
+	dispatchConcurrency = 4
+	dispatchTimeout     = 30 * time.Second
 )
 
 type Server struct {
 	cfg          *config.Config
 	aggregator   *service.Aggregator
-	downloader   *downloader.Engine
 	queueManager *queue.Manager
+	auth         *authStore
 	router       *chi.Mux
+	sem          chan struct{} // bounds concurrent provider lookups
 }
 
-func NewServer(cfg *config.Config, agg *service.Aggregator, dl *downloader.Engine, qm *queue.Manager) *Server {
+func NewServer(cfg *config.Config, agg *service.Aggregator, qm *queue.Manager) *Server {
 	s := &Server{
 		cfg:          cfg,
 		aggregator:   agg,
-		downloader:   dl,
 		queueManager: qm,
+		auth:         newAuthStore(cfg.QBitUsername, cfg.QBitPassword, cfg.APIKey),
 		router:       chi.NewRouter(),
+		sem:          make(chan struct{}, dispatchConcurrency),
 	}
 	s.setupRoutes()
 	return s
@@ -42,33 +49,26 @@ func NewServer(cfg *config.Config, agg *service.Aggregator, dl *downloader.Engin
 
 func (s *Server) setupRoutes() {
 	s.router.Use(middleware.RequestID)
-	s.router.Use(middleware.RealIP)
-	s.router.Use(middleware.Logger)
+	s.router.Use(accessLog)
 	s.router.Use(middleware.Recoverer)
+	s.router.Use(limitBody)
+	s.router.Use(sameOrigin)
 
-	s.router.Use(cors.Handler(cors.Options{
-		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders: []string{"*"},
-	}))
-
-	// Dashboard & Root
-	s.router.Get("/", s.handleRoot)
+	// Public: qBittorrent login and a minimal health probe.
+	s.router.Post("/api/v2/auth/login", s.handleQBitLogin)
 	s.router.Get("/api/status", s.handleStatus)
 
-	// Setup qBittorrent mock endpoints for Sonarr/Radarr
-	s.setupQBittorrentRoutes()
+	s.router.Group(func(r chi.Router) {
+		r.Use(s.requireAuth)
+		r.Get("/", s.handleRoot)
+		s.setupQBittorrentRoutes(r)
+		s.setupDashboardRoutes(r)
 
-	// Setup Web Dashboard endpoints
-	s.setupDashboardRoutes()
-
-	// Torznab endpoints (compat with Prowlarr / Sonarr / Radarr)
-	s.router.Get("/torznab", s.handleTorznab)
-	s.router.Get("/torznab/api", s.handleTorznab)
-	s.router.Get("/torznab/download", s.handleTorznabDownload)
-
-	// Manual download trigger API
-	s.router.Post("/api/download", s.handleManualDownload)
+		// Torznab endpoints (compat with Prowlarr / Sonarr / Radarr)
+		r.Get("/torznab", s.handleTorznab)
+		r.Get("/torznab/api", s.handleTorznab)
+		r.Get("/torznab/download", s.handleTorznabDownload)
+	})
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -78,151 +78,68 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"service":   "Media Stream Bridge",
-		"version":   "2.1 (Golang + Queue Manager)",
-		"status":    "running",
-		"dashboard": "/dashboard",
-		"torznab":   "/torznab/api",
+		"service":     "Media Stream Bridge",
+		"status":      "running",
+		"dashboard":   "/dashboard",
+		"torznab":     "/torznab/api",
 		"qbittorrent": "/api/v2",
 	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":      "ok",
-		"version":     "2.1.0",
-		"queue_count": len(s.queueManager.GetAllJobs()),
-	})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (s *Server) handleTorznab(w http.ResponseWriter, r *http.Request) {
-	tMode := strings.ToLower(r.URL.Query().Get("t"))
-	if tMode == "" {
-		tMode = "caps"
-	}
-
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	hostURL := fmt.Sprintf("%s://%s", scheme, r.Host)
-
-	if tMode == "caps" {
-		capsBytes, err := GetCapsXML()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		_, _ = w.Write(capsBytes)
-		return
-	}
-
-	query := r.URL.Query().Get("q")
-	// If Sonarr queries by episode/season, check query string
-	if query == "" {
-		query = r.URL.Query().Get("title")
-	}
-
-	results := s.aggregator.SearchAll(r.Context(), query)
-	rssBytes, err := GenerateRSSXML(results, hostURL)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	_, _ = w.Write(rssBytes)
-}
-
-func (s *Server) handleTorznabDownload(w http.ResponseWriter, r *http.Request) {
-	rawURL := r.URL.Query().Get("url")
-	cat := r.URL.Query().Get("cat")
-	title := r.URL.Query().Get("title")
-
-	if rawURL == "" {
-		http.Error(w, "Missing URL", http.StatusBadRequest)
-		return
-	}
-
-	log.Printf("[Torznab Grab] Grabbed item: %s, url: %s, cat: %s", title, rawURL, cat)
-
-	// Dispatch to central queue
-	s.dispatchJobToQueue(rawURL, title, cat, "")
-
-	// Return dummy 200 OK torrent content so *arr marks grab as success
-	w.Header().Set("Content-Type", "application/x-bittorrent")
-	_, _ = w.Write([]byte("d8:announce0:e"))
-}
-
-func (s *Server) dispatchJobToQueue(rawURL, title, cat, customSavePath string) {
+// dispatchJob resolves a bridge:// URI and queues it. Provider lookups are
+// bounded by a small semaphore so a burst of URLs cannot fan out unchecked.
+func (s *Server) dispatchJob(ctx context.Context, rawURL, title, cat, customSavePath string) error {
 	if !strings.HasPrefix(rawURL, "bridge://") {
-		return
+		return fmt.Errorf("not a bridge URI")
+	}
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
-	go func() {
-		bgCtx := context.Background()
-		media, err := s.aggregator.GetMediaByURI(bgCtx, rawURL)
-		if err != nil {
-			log.Printf("[Queue Dispatch] Failed to resolve media %s: %v", rawURL, err)
-			return
-		}
+	ctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
+	defer cancel()
+	media, err := s.aggregator.GetMediaByURI(ctx, rawURL)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", rawURL, err)
+	}
 
-		destDir := customSavePath
-		if destDir == "" {
-			if media.Category == "tv" || cat == "tv" {
-				seriesClean := formatter.PickBestEnglishTitle(media.OriginalTitle, "", media.Title)
-				if seriesClean == "" {
-					seriesClean = media.Title
-				}
-				seriesClean = formatter.CleanSeriesName(seriesClean)
-				season := formatter.DetectSeason(media.Title, media.OriginalTitle, title)
-				if season <= 0 {
-					season = 1
-				}
-				destDir = filepath.Join(s.cfg.Storage.DefaultDownloadDir, "series", seriesClean, fmt.Sprintf("Season %02d", season))
-			} else {
-				movieName := formatter.PickBestEnglishTitle(media.OriginalTitle, "", media.Title)
-				if movieName == "" {
-					movieName = media.Title
-				}
-				destDir = filepath.Join(s.cfg.Storage.DefaultDownloadDir, "movies", movieName)
-			}
-		}
-
-		s.queueManager.AddJob(title, rawURL, cat, destDir, media)
-	}()
+	destDir := s.resolveDestDir(media.Category == "tv" || cat == "tv", media.Title, media.OriginalTitle, title, customSavePath)
+	_, err = s.queueManager.AddJob(title, rawURL, cat, destDir, media)
+	return err
 }
 
-func (s *Server) handleManualDownload(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		URI      string `json:"uri"`
-		Category string `json:"category"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+// resolveDestDir picks the download directory. A client supplied save path is
+// honoured only when it lies inside the download root.
+func (s *Server) resolveDestDir(isTV bool, mediaTitle, origTitle, jobTitle, customSavePath string) string {
+	root := s.cfg.Storage.DefaultDownloadDir
+	if customSavePath != "" {
+		if pathsafe.Within(root, customSavePath) {
+			return filepath.Clean(customSavePath)
+		}
+		log.Printf("[Queue Dispatch] Ignoring save path outside download dir: %q", customSavePath)
 	}
 
-	go func() {
-		media, err := s.aggregator.GetMediaByURI(r.Context(), body.URI)
-		if err != nil {
-			log.Printf("[Manual DL] Failed: %v", err)
-			return
+	name := formatter.PickBestEnglishTitle(origTitle, "", mediaTitle)
+	if name == "" {
+		name = mediaTitle
+	}
+	if isTV {
+		series := pathsafe.SafeComponent(formatter.CleanSeriesName(name))
+		season := formatter.DetectSeason(mediaTitle, origTitle, jobTitle)
+		if season <= 0 {
+			season = 1
 		}
-		targetBase := s.cfg.Storage.TVBaseDir
-		if body.Category == "movie" {
-			targetBase = s.cfg.Storage.MovieBaseDir
-		}
-		destDir := filepath.Join(targetBase, media.Title)
-		for _, ep := range media.Episodes {
-			_ = s.downloader.DownloadEpisode(r.Context(), media, &ep, destDir)
-		}
-	}()
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
+		return filepath.Join(root, "series", series, fmt.Sprintf("Season %02d", season))
+	}
+	return filepath.Join(root, "movies", pathsafe.SafeComponent(name))
 }
 
 func (s *Server) Router() *chi.Mux {
